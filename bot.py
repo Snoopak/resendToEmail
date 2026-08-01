@@ -2,12 +2,21 @@ import os
 import smtplib
 import asyncio
 import logging
+import socket
 from aiohttp import web
 from email.message import EmailMessage
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# --- ПАТЧ ДЛЯ ВИПРАВЛЕННЯ [Errno 101] (Примусовий IPv4) ---
+old_getaddrinfo = socket.getaddrinfo
+def new_getaddrinfo(*args, **kwargs):
+    responses = old_getaddrinfo(*args, **kwargs)
+    return [response for response in responses if response[0] == socket.AF_INET]
+socket.getaddrinfo = new_getaddrinfo
+# --------------------------------------------------------
 
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -157,7 +166,7 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
                 file_data = f.read()
             msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
         
-    with smtplib.SMTP('smtp-mail.outlook.com', 587, timeout=15) as smtp:
+    with smtplib.SMTP('smtp.office365.com', 587, timeout=15) as smtp:
         smtp.starttls() # Спеціальне шифрування для 587 порту
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         smtp.send_message(msg)
