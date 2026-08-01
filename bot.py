@@ -157,7 +157,8 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
                 file_data = f.read()
             msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
         
-    with smtplib.SMTP_SSL('smtp.ukr.net', 465) as smtp:
+    with smtplib.SMTP('smtp-mail.outlook.com', 587, timeout=15) as smtp:
+        smtp.starttls() # Спеціальне шифрування для 587 порту
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         smtp.send_message(msg)
 
