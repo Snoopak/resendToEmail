@@ -2,6 +2,7 @@ import os
 import smtplib
 import asyncio
 import logging
+from aiohttp import web
 from email.message import EmailMessage
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
@@ -307,8 +308,22 @@ async def state_text_received(message: types.Message, state: FSMContext):
         await execute_send(chat_id)
     await state.clear()
 
+async def handle_ping(request):
+    return web.Response(text="Bot is alive!")
+
 async def main():
-    logging.info("🔥 Бот з аватарками запущений!")
+    logging.info("🔥 Універсальний бот-місток запущений!")
+    
+    # Піднімаємо фоновий веб-сервер для Render (щоб працював безкоштовний Web Service)
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.getenv("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    
+    # Запускаємо самого бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
