@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.pyc
+venv/
+.venv/
+avatar_*.jpg
+*.ogg
+*.mp4
+*.mp3
+*.webp
+*.lock
+/tmp/

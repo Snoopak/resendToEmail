@@ -4,13 +4,49 @@ import asyncio
 import logging
 import socket
 import signal
-import fcntl
+import sys
 from aiohttp import web
 from email.message import EmailMessage
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+
+# --- ЗАВАНТАЖЕННЯ .env (тільки якщо файл існує) ---
+try:
+    from dotenv import load_dotenv
+    if os.path.exists(".env"):
+        load_dotenv()
+        logging.info("✅ .env файл завантажено")
+except ImportError:
+    pass  # Якщо python-dotenv не встановлено - просто ігноруємо
+
+# --- ФУНКЦІЯ БЛОКУВАННЯ (без fcntl, працює на Windows) ---
+def acquire_lock():
+    lock_file = "bot.lock"
+    try:
+        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        with os.fdopen(fd, 'w') as f:
+            f.write(str(os.getpid()))
+        logging.info("🔒 Лок успішно отримано (PID: %s)", os.getpid())
+        return lock_file
+    except FileExistsError:
+        try:
+            with open(lock_file, 'r') as f:
+                pid = int(f.read().strip())
+            os.kill(pid, 0)
+            logging.warning("⚠️ Інший екземпляр бота вже запущено (PID: %s). Виходимо...", pid)
+            return None
+        except (ProcessLookupError, FileNotFoundError, ValueError, OSError):
+            logging.info("🔓 Старий лок-файл знайдено, але процес неактивний. Перезаймаємо...")
+            try:
+                os.remove(lock_file)
+            except:
+                pass
+            return acquire_lock()
+    except Exception as e:
+        logging.error(f"Помилка створення лока: {e}")
+        return None
 
 # --- ПАТЧ ДЛЯ ВИПРАВЛЕННЯ [Errno 101] (Примусовий IPv4) ---
 old_getaddrinfo = socket.getaddrinfo
@@ -23,28 +59,33 @@ socket.getaddrinfo = new_getaddrinfo
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
+# Спроба отримати лок (тільки якщо не Render)
+if not os.getenv("RENDER"):
+    lock_file_path = acquire_lock()
+    if not lock_file_path:
+        sys.exit(0)
+else:
+    lock_file_path = None
+    logging.info("🔓 Render середовище - пропускаємо лок")
+
+# --- ЗМІННІ СЕРЕДОВИЩА ---
 TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 TARGET_EMAIL = os.getenv("TARGET_EMAIL", EMAIL_ADDRESS)
 
-# 🔒 Файл-локалка для запобігання запуску двох інстансів
-LOCK_FILE = "/tmp/bot.lock"
+# Перевірка наявності токенів
+if not TOKEN:
+    logging.error("❌ BOT_TOKEN не знайдено! Встановіть змінну середовища або створіть .env файл.")
+    logging.info("📌 Створіть файл .env з вмістом:")
+    logging.info("BOT_TOKEN=ваш_токен")
+    logging.info("EMAIL_ADDRESS=your@gmail.com")
+    logging.info("EMAIL_PASSWORD=ваш_пароль")
+    logging.info("TARGET_EMAIL=recipient@ukr.net")
+    sys.exit(1)
 
-def acquire_lock():
-    """Перевіряє, чи не запущено вже інший екземпляр бота."""
-    try:
-        lock_fd = open(LOCK_FILE, 'w')
-        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        return lock_fd
-    except (IOError, OSError):
-        logging.warning("⚠️ Інший екземпляр бота вже запущено. Виходимо...")
-        return None
-
-# Спроба отримати лок
-lock_fd = acquire_lock()
-if not lock_fd:
-    exit(0)
+if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
+    logging.warning("⚠️ EMAIL_ADDRESS або EMAIL_PASSWORD не задані! Листи не будуть відправлятись.")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -102,7 +143,7 @@ async def get_forward_data(message: types.Message, bot: Bot) -> dict:
 
         elif isinstance(origin, types.MessageOriginHiddenUser):
             data["name"] = origin.sender_user_name
-            data["type"] = "Прихований користувач (Налаштування приватності)"
+            data["type"] = "Прихований користувач"
             
         elif isinstance(origin, types.MessageOriginChat):
             data["name"] = origin.sender_chat.title
@@ -163,7 +204,6 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
     msg['To'] = TARGET_EMAIL
     
     msg.set_content(text_content)
-    
     html_content = generate_html_email(subject, text_content, forward_data)
     msg.add_alternative(html_content, subtype='html')
 
@@ -365,16 +405,20 @@ async def handle_ping(request):
     return web.Response(text="Bot is alive!")
 
 async def shutdown():
-    logging.info("🛑 Отримано сигнал завершення, зупиняю бота...")
+    logging.info("🛑 Зупиняю бота...")
     await bot.session.close()
     for chat_id in list(buffer.keys()):
         if "task" in buffer[chat_id]:
             buffer[chat_id]["task"].cancel()
-    # Звільняємо лок-файл
-    if lock_fd:
-        fcntl.flock(lock_fd, fcntl.LOCK_UN)
-        lock_fd.close()
-        os.unlink(LOCK_FILE)
+    
+    global lock_file_path
+    if lock_file_path and os.path.exists(lock_file_path):
+        try:
+            os.remove(lock_file_path)
+            logging.info("🔓 Лок-файл видалено")
+        except Exception as e:
+            logging.error(f"Помилка видалення лока: {e}")
+    
     logging.info("✅ Бот зупинено")
 
 def handle_sigterm():
@@ -402,10 +446,6 @@ async def main():
         logging.error(f"Polling впав: {e}")
     finally:
         await runner.cleanup()
-        # Звільняємо лок при завершенні
-        if lock_fd:
-            fcntl.flock(lock_fd, fcntl.LOCK_UN)
-            lock_fd.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
