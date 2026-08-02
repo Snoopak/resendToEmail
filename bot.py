@@ -3,50 +3,20 @@ import smtplib
 import asyncio
 import logging
 import socket
-import signal
-import sys
-from aiohttp import web
 from email.message import EmailMessage
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- ЗАВАНТАЖЕННЯ .env (тільки якщо файл існує) ---
+# --- ЗАВАНТАЖЕННЯ .env (якщо файл існує) ---
 try:
     from dotenv import load_dotenv
     if os.path.exists(".env"):
         load_dotenv()
-        logging.info("✅ .env файл завантажено")
+        print("✅ .env файл завантажено")
 except ImportError:
-    pass  # Якщо python-dotenv не встановлено - просто ігноруємо
-
-# --- ФУНКЦІЯ БЛОКУВАННЯ (без fcntl, працює на Windows) ---
-def acquire_lock():
-    lock_file = "bot.lock"
-    try:
-        fd = os.open(lock_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        with os.fdopen(fd, 'w') as f:
-            f.write(str(os.getpid()))
-        logging.info("🔒 Лок успішно отримано (PID: %s)", os.getpid())
-        return lock_file
-    except FileExistsError:
-        try:
-            with open(lock_file, 'r') as f:
-                pid = int(f.read().strip())
-            os.kill(pid, 0)
-            logging.warning("⚠️ Інший екземпляр бота вже запущено (PID: %s). Виходимо...", pid)
-            return None
-        except (ProcessLookupError, FileNotFoundError, ValueError, OSError):
-            logging.info("🔓 Старий лок-файл знайдено, але процес неактивний. Перезаймаємо...")
-            try:
-                os.remove(lock_file)
-            except:
-                pass
-            return acquire_lock()
-    except Exception as e:
-        logging.error(f"Помилка створення лока: {e}")
-        return None
+    pass
 
 # --- ПАТЧ ДЛЯ ВИПРАВЛЕННЯ [Errno 101] (Примусовий IPv4) ---
 old_getaddrinfo = socket.getaddrinfo
@@ -59,33 +29,18 @@ socket.getaddrinfo = new_getaddrinfo
 # Налаштування логування
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Спроба отримати лок (тільки якщо не Render)
-if not os.getenv("RENDER"):
-    lock_file_path = acquire_lock()
-    if not lock_file_path:
-        sys.exit(0)
-else:
-    lock_file_path = None
-    logging.info("🔓 Render середовище - пропускаємо лок")
-
 # --- ЗМІННІ СЕРЕДОВИЩА ---
 TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 TARGET_EMAIL = os.getenv("TARGET_EMAIL", EMAIL_ADDRESS)
 
-# Перевірка наявності токенів
 if not TOKEN:
-    logging.error("❌ BOT_TOKEN не знайдено! Встановіть змінну середовища або створіть .env файл.")
-    logging.info("📌 Створіть файл .env з вмістом:")
-    logging.info("BOT_TOKEN=ваш_токен")
-    logging.info("EMAIL_ADDRESS=your@gmail.com")
-    logging.info("EMAIL_PASSWORD=ваш_пароль")
-    logging.info("TARGET_EMAIL=recipient@ukr.net")
-    sys.exit(1)
+    logging.error("❌ BOT_TOKEN не знайдено! Створіть .env файл.")
+    exit()
 
 if not EMAIL_ADDRESS or not EMAIL_PASSWORD:
-    logging.warning("⚠️ EMAIL_ADDRESS або EMAIL_PASSWORD не задані! Листи не будуть відправлятись.")
+    logging.warning("⚠️ EMAIL_ADDRESS або EMAIL_PASSWORD не задані!")
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -105,6 +60,7 @@ def get_action_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def get_forward_data(message: types.Message, bot: Bot) -> dict:
+    """Витягує дані автора, якщо повідомлення переслане."""
     if not message.forward_origin:
         return None
 
@@ -155,6 +111,7 @@ async def get_forward_data(message: types.Message, bot: Bot) -> dict:
     return data
 
 def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
+    """Генерує HTML-лист з блоком автора (якщо є)."""
     formatted_text = text.replace('\n', '<br>')
     
     forward_html = ""
@@ -198,6 +155,7 @@ def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
     """
 
 def send_email_sync(files: list, text_content: str, subject: str, forward_data: dict):
+    """Відправка листа через Gmail SMTP."""
     msg = EmailMessage()
     msg['Subject'] = subject
     msg['From'] = EMAIL_ADDRESS
@@ -224,13 +182,14 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
         smtp.send_message(msg)
 
 async def execute_send(chat_id: int):
+    """Асинхронна обгортка для відправки."""
     if chat_id not in buffer: 
         return
     
     data = buffer.pop(chat_id)
     files = data.get("files", [])
     text_content = data.get("text", "Без тексту")
-    subject = data.get("subject", "📁 Файли з Telegram / Viber")
+    subject = data.get("subject", "📁 Файли з Telegram")
     forward_data = data.get("forward_data")
     
     try:
@@ -243,9 +202,9 @@ async def execute_send(chat_id: int):
             f"✅ Відправлено! (Вкладень: {files_count})\n**Тема:** {subject}", 
             parse_mode="Markdown"
         )
-        logging.info(f"📨 Лист успішно відправлено для {chat_id}")
+        logging.info(f"📨 Лист відправлено для {chat_id}")
     except Exception as e:
-        logging.error(f"Помилка відправки для {chat_id}: {e}")
+        logging.error(f"Помилка: {e}")
         await bot.send_message(chat_id, f"❌ Помилка: {e}")
     finally:
         for file_obj in files:
@@ -255,6 +214,7 @@ async def execute_send(chat_id: int):
             os.remove(forward_data["avatar_path"])
 
 async def process_and_send_timer(chat_id: int):
+    """Автоматична відправка через 8 секунд."""
     try:
         await asyncio.sleep(8.0) 
         if chat_id in buffer:
@@ -271,9 +231,11 @@ async def process_and_send_timer(chat_id: int):
 
 @dp.message(F.document | F.photo | F.video | F.audio | F.voice | F.animation)
 async def handle_files(message: types.Message, state: FSMContext):
+    """Обробляє БУДЬ-ЯКІ файли: переслані або завантажені з комп'ютера."""
     chat_id = message.chat.id
     media_group_id = message.media_group_id
     
+    # Визначаємо тип файлу
     if message.document:
         file_id, original_name = message.document.file_id, message.document.file_name or "document"
     elif message.photo:
@@ -296,6 +258,7 @@ async def handle_files(message: types.Message, state: FSMContext):
         file = await bot.get_file(file_id)
         await bot.download(file, destination=file_path)
         
+        # Отримуємо дані автора (якщо переслане)
         forward_data = await get_forward_data(message, bot)
         caption_text = message.caption if message.caption else "Без тексту"
 
@@ -317,7 +280,7 @@ async def handle_files(message: types.Message, state: FSMContext):
             buffer[chat_id] = {
                 "files": [{"path": file_path, "name": file_name}],
                 "text": caption_text,
-                "subject": "📁 Файли з Telegram / Viber",
+                "subject": "📁 Файли з Telegram",
                 "reply_id": reply.message_id,
                 "media_group_id": media_group_id,
                 "forward_data": forward_data,
@@ -333,6 +296,7 @@ async def handle_files(message: types.Message, state: FSMContext):
 
 @dp.message(F.text & ~F.document & ~F.photo & ~F.video & ~F.audio & ~F.voice & ~F.animation)
 async def handle_quick_text(message: types.Message, state: FSMContext):
+    """Обробляє текст, якщо є файли в буфері."""
     chat_id = message.chat.id
     if await state.get_state() is not None: 
         return 
@@ -354,6 +318,7 @@ async def handle_quick_text(message: types.Message, state: FSMContext):
 
 @dp.callback_query(F.data == "send_now")
 async def cb_send_now(callback: types.CallbackQuery):
+    """Відправити зараз."""
     chat_id = callback.message.chat.id
     if chat_id in buffer:
         buffer[chat_id]["task"].cancel()
@@ -363,6 +328,7 @@ async def cb_send_now(callback: types.CallbackQuery):
 
 @dp.callback_query(F.data == "add_subject")
 async def cb_add_subject(callback: types.CallbackQuery, state: FSMContext):
+    """Змінити тему листа."""
     chat_id = callback.message.chat.id
     if chat_id in buffer:
         buffer[chat_id]["task"].cancel() 
@@ -401,41 +367,8 @@ async def cmd_start(message: types.Message):
         parse_mode="Markdown"
     )
 
-async def handle_ping(request):
-    return web.Response(text="Bot is alive!")
-
-async def shutdown():
-    logging.info("🛑 Зупиняю бота...")
-    await bot.session.close()
-    for chat_id in list(buffer.keys()):
-        if "task" in buffer[chat_id]:
-            buffer[chat_id]["task"].cancel()
-    
-    global lock_file_path
-    if lock_file_path and os.path.exists(lock_file_path):
-        try:
-            os.remove(lock_file_path)
-            logging.info("🔓 Лок-файл видалено")
-        except Exception as e:
-            logging.error(f"Помилка видалення лока: {e}")
-    
-    logging.info("✅ Бот зупинено")
-
-def handle_sigterm():
-    asyncio.create_task(shutdown())
-
 async def main():
-    logging.info("🔥 Універсальний бот-місток запущений!")
-    
-    app = web.Application()
-    app.router.add_get("/", handle_ping)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    port = int(os.getenv("PORT", 8080))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    
-    signal.signal(signal.SIGTERM, lambda s, f: handle_sigterm())
+    logging.info("🔥 Бот-місток запущений!")
     
     await bot.delete_webhook(drop_pending_updates=True)
     await asyncio.sleep(0.5)
@@ -444,8 +377,6 @@ async def main():
         await dp.start_polling(bot)
     except Exception as e:
         logging.error(f"Polling впав: {e}")
-    finally:
-        await runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
