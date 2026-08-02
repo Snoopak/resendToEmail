@@ -440,6 +440,7 @@ def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
 
 
 def send_email_sync(files: list, text_content: str, subject: str, forward_data: dict, target_email: str):
+    logging.info(f"📧 Відправляю лист на {target_email} з {len(files)} вкладеннями")
     """Відправка листа через Gmail SMTP на вказану пошту."""
     msg = EmailMessage()
     msg['Subject'] = subject
@@ -454,13 +455,20 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
         with open(forward_data["avatar_path"], 'rb') as img:
             msg.get_payload()[1].add_related(img.read(), maintype='image', subtype='jpeg', cid='avatar_img')
 
+    # 🔥 ВИПРАВЛЕНО: додаємо всі файли з унікальними іменами
     for file_obj in files:
         file_path = file_obj["path"]
         file_name = file_obj["name"]
         if file_path and os.path.exists(file_path):
             with open(file_path, 'rb') as f:
                 file_data = f.read()
-            msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
+            # Додаємо файл як вкладення з правильним типом
+            msg.add_attachment(
+                file_data,
+                maintype='application',
+                subtype='octet-stream',
+                filename=file_name
+            )
         
     with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as smtp:
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
@@ -471,6 +479,7 @@ async def execute_send(chat_id: int):
     """Асинхронна обгортка для відправки."""
     if chat_id not in buffer: 
         return
+    logging.info(f"📨 Починаю відправку для {chat_id}, файлів у буфері: {len(buffer[chat_id].get('files', []))}")
     
     user_email = get_user_email(chat_id)
     if not user_email:
@@ -479,9 +488,16 @@ async def execute_send(chat_id: int):
     
     data = buffer.pop(chat_id)
     files = data.get("files", [])
-    text_content = data.get("text", "Без тексту")
+    text_content = data.get("text", "")
     subject = data.get("subject", "📁 Файли з Telegram")
     forward_data = data.get("forward_data")
+
+    # 🔥 ФОРМУЄМО КРАСИВИЙ ТЕКСТ
+    if not text_content or text_content == "Без тексту":
+        files_count = len(files)
+        text_content = f"📎 Вам надіслано {files_count} файл(ів) через Telegram-бот.\n\nФайли додано до цього листа як вкладення."
+    else:
+        text_content = f"📨 {text_content}"
     
     try:
         async with semaphore:
@@ -489,8 +505,13 @@ async def execute_send(chat_id: int):
         
         files_count = len(files)
         await bot.send_message(
-            chat_id, 
-            f"✅ Відправлено на {user_email}! (Вкладень: {files_count})\n**Тема:** {subject}", 
+            chat_id,
+            f"✅ **Відправлено!**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📧 **Пошта:** {user_email}\n"
+            f"📎 **Вкладень:** {files_count}\n"
+            f"📌 **Тема:** {subject}\n"
+            f"━━━━━━━━━━━━━━━━━━",
             parse_mode="Markdown"
         )
         logging.info(f"📨 Лист відправлено для {chat_id} на {user_email}")
@@ -510,6 +531,7 @@ async def process_and_send_timer(chat_id: int):
     try:
         await asyncio.sleep(8.0) 
         if chat_id in buffer:
+            logging.info(f"⏰ Таймер спрацював для {chat_id}, файлів у буфері: {len(buffer[chat_id].get('files', []))}")
             reply_id = buffer[chat_id].get("reply_id")
             if reply_id:
                 try: 
@@ -679,60 +701,66 @@ async def help_button(message: types.Message):
 
 
 # ============================================================
-# ОБРОБНИКИ ФАЙЛІВ ТА ТЕКСТУ
+# ОБРОБНИКИ ФАЙЛІВ ТА ТЕКСТУ (з групуванням альбомів)
 # ============================================================
 
 @dp.message(F.document | F.photo | F.video | F.audio | F.voice | F.animation)
 async def handle_files(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     media_group_id = message.media_group_id
-    
+
     if not is_user_verified(chat_id):
         await message.reply("❌ Спочатку підтверди email командою /start")
         return
-    
+
+    # Визначаємо тип файлу
     if message.document:
         file_id, original_name = message.document.file_id, message.document.file_name or "document"
     elif message.photo:
-        file_id, original_name = message.photo[-1].file_id, "photo.jpg"
+        file_id, original_name = message.photo[-1].file_id, f"photo_{message.message_id}.jpg"
     elif message.video:
-        file_id, original_name = message.video.file_id, message.video.file_name or "video.mp4"
+        file_id, original_name = message.video.file_id, message.video.file_name or f"video_{message.message_id}.mp4"
     elif message.audio:
-        file_id, original_name = message.audio.file_id, message.audio.file_name or "audio.mp3"
+        file_id, original_name = message.audio.file_id, message.audio.file_name or f"audio_{message.message_id}.mp3"
     elif message.voice:
-        file_id, original_name = message.voice.file_id, "voice.ogg"
+        file_id, original_name = message.voice.file_id, f"voice_{message.message_id}.ogg"
     elif message.animation:
-        file_id, original_name = message.animation.file_id, message.animation.file_name or "animation.mp4"
-    else: 
+        file_id, original_name = message.animation.file_id, message.animation.file_name or f"animation_{message.message_id}.mp4"
+    else:
         return
-    
-    safe_prefix = str(message.message_id)
-    file_path, file_name = f"{safe_prefix}_{original_name}", original_name
-    
+
+    file_path = f"{message.message_id}_{original_name}"
+
     try:
         file = await bot.get_file(file_id)
         await bot.download(file, destination=file_path)
-        
+
         forward_data = await get_forward_data(message, bot)
         caption_text = message.caption if message.caption else "Без тексту"
 
-        if chat_id not in buffer or (media_group_id and buffer[chat_id].get("media_group_id") != media_group_id):
-            await state.clear()
-            if chat_id in buffer:
-                if "task" in buffer[chat_id]: 
+        # Перевіряємо, чи це новий альбом
+        is_new_album = (
+            chat_id not in buffer or 
+            (media_group_id and buffer[chat_id].get("media_group_id") != media_group_id)
+        )
+
+        if is_new_album:
+            # Якщо в буфері вже є файли і це новий альбом — відправляємо старі
+            if chat_id in buffer and buffer[chat_id].get("files"):
+                # Скасовуємо старий таймер
+                if "task" in buffer[chat_id]:
                     buffer[chat_id]["task"].cancel()
-                for old_f in buffer[chat_id].get("files", []):
-                    if os.path.exists(old_f["path"]): 
-                        os.remove(old_f["path"])
-            
+                await execute_send(chat_id)
+
+            # Створюємо новий буфер
             reply = await message.reply(
-                "📥 **Отримано!** Можеш дописати текст або обрати дію.", 
-                reply_markup=get_action_keyboard(), 
+                "📥 **Отримано!** Можеш дописати текст або обрати дію.",
+                reply_markup=get_action_keyboard(),
                 parse_mode="Markdown"
             )
 
             buffer[chat_id] = {
-                "files": [{"path": file_path, "name": file_name}],
+                "files": [{"path": file_path, "name": original_name}],
                 "text": caption_text,
                 "subject": "📁 Файли з Telegram",
                 "reply_id": reply.message_id,
@@ -740,37 +768,33 @@ async def handle_files(message: types.Message, state: FSMContext):
                 "forward_data": forward_data,
                 "task": asyncio.create_task(process_and_send_timer(chat_id))
             }
+            logging.info(f"📂 Новий буфер створено для {chat_id}, файлів: 1")
         else:
-            buffer[chat_id]["files"].append({"path": file_path, "name": file_name})
+            # Додаємо файл до існуючого буфера
+            buffer[chat_id]["files"].append({"path": file_path, "name": original_name})
             if caption_text != "Без тексту" and buffer[chat_id]["text"] == "Без тексту":
                 buffer[chat_id]["text"] = caption_text
+
+            # 🔥 СКАСОВУЄМО СТАРИЙ ТАЙМЕР
+            if "task" in buffer[chat_id]:
+                buffer[chat_id]["task"].cancel()
             
+            # 🔥 ЗАПУСКАЄМО НОВИЙ ТАЙМЕР
+            buffer[chat_id]["task"] = asyncio.create_task(process_and_send_timer(chat_id))
+
+            # Оновлюємо повідомлення з кількістю файлів
+            files_count = len(buffer[chat_id]["files"])
+            await bot.edit_message_text(
+                f"📥 **Отримано {files_count} файл(ів)!**\nМожеш дописати текст або обрати дію.",
+                chat_id=chat_id,
+                message_id=buffer[chat_id]["reply_id"],
+                reply_markup=get_action_keyboard(),
+                parse_mode="Markdown"
+            )
+            logging.info(f"📂 Додано файл до буфера {chat_id}, тепер файлів: {files_count}")
+
     except Exception as e:
         await message.reply(f"❌ Помилка: {e}")
-
-
-@dp.message(F.text & ~F.document & ~F.photo & ~F.video & ~F.audio & ~F.voice & ~F.animation)
-async def handle_quick_text(message: types.Message, state: FSMContext):
-    chat_id = message.chat.id
-    
-    if await state.get_state() is not None: 
-        return 
-        
-    if chat_id in buffer and "task" in buffer[chat_id]:
-        buffer[chat_id]["task"].cancel() 
-        reply_id = buffer[chat_id].get("reply_id")
-        if reply_id:
-            try: 
-                await bot.edit_message_reply_markup(chat_id=chat_id, message_id=reply_id, reply_markup=None)
-            except: 
-                pass
-            
-        buffer[chat_id]["text"] = message.text
-        if message.forward_origin:
-            buffer[chat_id]["forward_data"] = await get_forward_data(message, bot)
-            
-        await execute_send(chat_id)
-
 
 # ============================================================
 # ОБРОБНИКИ INLINE КНОПОК (в повідомленні)
