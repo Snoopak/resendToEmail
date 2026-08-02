@@ -166,8 +166,7 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
                 file_data = f.read()
             msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
         
-    with smtplib.SMTP('smtp.office365.com', 587, timeout=15) as smtp:
-        smtp.starttls() # Спеціальне шифрування для 587 порту
+    with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as smtp:
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         smtp.send_message(msg)
 
