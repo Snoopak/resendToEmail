@@ -3,6 +3,7 @@ import smtplib
 import asyncio
 import logging
 import socket
+import signal
 from aiohttp import web
 from email.message import EmailMessage
 from aiogram import Bot, Dispatcher, F, types
@@ -24,7 +25,7 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 TOKEN = os.getenv("BOT_TOKEN")
 EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-TARGET_EMAIL = os.getenv("TARGET_EMAIL", EMAIL_ADDRESS) # За замовчуванням ту саму пошту       
+TARGET_EMAIL = os.getenv("TARGET_EMAIL", EMAIL_ADDRESS)
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
@@ -34,6 +35,7 @@ class MailFlow(StatesGroup):
     waiting_for_text = State()
 
 buffer = {}
+semaphore = asyncio.Semaphore(3)  # Обмежуємо кількість одночасних відправок
 
 def get_action_keyboard():
     buttons = [
@@ -58,10 +60,9 @@ async def get_forward_data(message: types.Message, bot: Bot) -> dict:
             if user.username:
                 data["link"] = f"https://t.me/{user.username}"
             
-            # Спроба завантажити аватарку користувача
             photos = await bot.get_user_profile_photos(user.id, limit=1)
             if photos.total_count > 0:
-                photo = photos.photos[0][0] # Беремо найменший розмір для аватарки
+                photo = photos.photos[0][0]
                 avatar_path = f"avatar_u_{user.id}.jpg"
                 file = await bot.get_file(photo.file_id)
                 await bot.download(file, destination=avatar_path)
@@ -74,7 +75,6 @@ async def get_forward_data(message: types.Message, bot: Bot) -> dict:
             if chat.username:
                 data["link"] = f"https://t.me/{chat.username}"
             
-            # Спроба завантажити аватарку каналу
             chat_info = await bot.get_chat(chat.id)
             if chat_info.photo:
                 avatar_path = f"avatar_c_{chat.id}.jpg"
@@ -101,7 +101,6 @@ def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
     
     forward_html = ""
     if forward_data:
-        # Якщо є аватарка, використовуємо CID (внутрішнє посилання), інакше - заглушку
         avatar_src = "cid:avatar_img" if forward_data.get("avatar_path") else "https://ui-avatars.com/api/?name=" + forward_data['name'][:1] + "&background=random"
         link_html = f'<br><a href="{forward_data["link"]}" style="font-size: 13px; color: #4299e1; text-decoration: none;">🔗 Перейти до профілю/каналу</a>' if forward_data.get("link") else ''
         
@@ -141,6 +140,7 @@ def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
     """
 
 def send_email_sync(files: list, text_content: str, subject: str, forward_data: dict):
+    """Синхронна відправка листа через Gmail SMTP з SSL."""
     msg = EmailMessage()
     msg['Subject'] = subject
     msg['From'] = EMAIL_ADDRESS
@@ -154,7 +154,6 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
     # Вбудовуємо аватарку в HTML тіло (якщо вона є)
     if forward_data and forward_data.get("avatar_path") and os.path.exists(forward_data["avatar_path"]):
         with open(forward_data["avatar_path"], 'rb') as img:
-            # get_payload()[1] звертається до HTML частини листа
             msg.get_payload()[1].add_related(img.read(), maintype='image', subtype='jpeg', cid='avatar_img')
 
     # Додаємо звичайні вкладення (файли/фото)
@@ -166,12 +165,16 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
                 file_data = f.read()
             msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
         
+    # Використовуємо SMTP_SSL з портом 465 (надійніше ніж STARTTLS на Render)
     with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as smtp:
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         smtp.send_message(msg)
 
 async def execute_send(chat_id: int):
-    if chat_id not in buffer: return
+    """Асинхронна обгортка для відправки з семафором."""
+    if chat_id not in buffer: 
+        return
+    
     data = buffer.pop(chat_id)
     files = data.get("files", [])
     text_content = data.get("text", "Без тексту")
@@ -179,28 +182,39 @@ async def execute_send(chat_id: int):
     forward_data = data.get("forward_data")
     
     try:
-        await asyncio.to_thread(send_email_sync, files, text_content, subject, forward_data)
+        # Обмежуємо кількість одночасних відправок через семафор
+        async with semaphore:
+            await asyncio.to_thread(send_email_sync, files, text_content, subject, forward_data)
+        
         files_count = len(files)
-        await bot.send_message(chat_id, f"✅ Відправлено! (Вкладень: {files_count})\n**Тема:** {subject}", parse_mode="Markdown")
+        await bot.send_message(
+            chat_id, 
+            f"✅ Відправлено! (Вкладень: {files_count})\n**Тема:** {subject}", 
+            parse_mode="Markdown"
+        )
+        logging.info(f"📨 Лист успішно відправлено для {chat_id}, тема: {subject}")
     except Exception as e:
         logging.error(f"Помилка відправки для {chat_id}: {e}")
         await bot.send_message(chat_id, f"❌ Помилка: {e}")
     finally:
-        # Видаляємо медіафайли
+        # Видаляємо тимчасові файли
         for file_obj in files:
-            if os.path.exists(file_obj["path"]): os.remove(file_obj["path"])
-        # Видаляємо аватарку
+            if os.path.exists(file_obj["path"]): 
+                os.remove(file_obj["path"])
         if forward_data and forward_data.get("avatar_path") and os.path.exists(forward_data["avatar_path"]):
             os.remove(forward_data["avatar_path"])
 
 async def process_and_send_timer(chat_id: int):
+    """Таймер на 8 секунд для автоматичної відправки."""
     try:
         await asyncio.sleep(8.0) 
         if chat_id in buffer:
             reply_id = buffer[chat_id].get("reply_id")
             if reply_id:
-                try: await bot.edit_message_reply_markup(chat_id=chat_id, message_id=reply_id, reply_markup=None)
-                except: pass
+                try: 
+                    await bot.edit_message_reply_markup(chat_id=chat_id, message_id=reply_id, reply_markup=None)
+                except: 
+                    pass
             await bot.send_message(chat_id, "⏳ Час вийшов, відправляю...")
             await execute_send(chat_id)
     except asyncio.CancelledError:
@@ -211,6 +225,7 @@ async def handle_files(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     media_group_id = message.media_group_id
     
+    # Визначаємо тип файлу
     if message.document:
         file_id, original_name = message.document.file_id, message.document.file_name or "document"
     elif message.photo:
@@ -223,7 +238,8 @@ async def handle_files(message: types.Message, state: FSMContext):
         file_id, original_name = message.voice.file_id, "voice.ogg"
     elif message.animation:
         file_id, original_name = message.animation.file_id, message.animation.file_name or "animation.mp4"
-    else: return
+    else: 
+        return
     
     safe_prefix = str(message.message_id)
     file_path, file_name = f"{safe_prefix}_{original_name}", original_name
@@ -232,18 +248,23 @@ async def handle_files(message: types.Message, state: FSMContext):
         file = await bot.get_file(file_id)
         await bot.download(file, destination=file_path)
         
-        # Асинхронно отримуємо дані автора пересилання
         forward_data = await get_forward_data(message, bot)
         caption_text = message.caption if message.caption else "Без тексту"
 
         if chat_id not in buffer or (media_group_id and buffer[chat_id].get("media_group_id") != media_group_id):
             await state.clear()
             if chat_id in buffer:
-                if "task" in buffer[chat_id]: buffer[chat_id]["task"].cancel()
+                if "task" in buffer[chat_id]: 
+                    buffer[chat_id]["task"].cancel()
                 for old_f in buffer[chat_id].get("files", []):
-                    if os.path.exists(old_f["path"]): os.remove(old_f["path"])
+                    if os.path.exists(old_f["path"]): 
+                        os.remove(old_f["path"])
             
-            reply = await message.reply("📥 **Отримано!** Можеш дописати текст або обрати дію.", reply_markup=get_action_keyboard(), parse_mode="Markdown")
+            reply = await message.reply(
+                "📥 **Отримано!** Можеш дописати текст або обрати дію.", 
+                reply_markup=get_action_keyboard(), 
+                parse_mode="Markdown"
+            )
 
             buffer[chat_id] = {
                 "files": [{"path": file_path, "name": file_name}],
@@ -265,17 +286,19 @@ async def handle_files(message: types.Message, state: FSMContext):
 @dp.message(F.text & ~F.document & ~F.photo & ~F.video & ~F.audio & ~F.voice & ~F.animation)
 async def handle_quick_text(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
-    if await state.get_state() is not None: return 
+    if await state.get_state() is not None: 
+        return 
         
     if chat_id in buffer and "task" in buffer[chat_id]:
         buffer[chat_id]["task"].cancel() 
         reply_id = buffer[chat_id].get("reply_id")
         if reply_id:
-            try: await bot.edit_message_reply_markup(chat_id=chat_id, message_id=reply_id, reply_markup=None)
-            except: pass
+            try: 
+                await bot.edit_message_reply_markup(chat_id=chat_id, message_id=reply_id, reply_markup=None)
+            except: 
+                pass
             
         buffer[chat_id]["text"] = message.text
-        # Якщо текст відправлено як окреме повідомлення (але це пересилка), оновлюємо дані автора
         if message.forward_origin:
             buffer[chat_id]["forward_data"] = await get_forward_data(message, bot)
             
@@ -306,24 +329,53 @@ async def state_subject_received(message: types.Message, state: FSMContext):
         buffer[chat_id]["subject"] = message.text
         await state.set_state(MailFlow.waiting_for_text)
         await message.reply("✅ Тему збережено!\nТепер напиши **текст** листа (або натисни /skip).", parse_mode="Markdown")
-    else: await state.clear()
+    else: 
+        await state.clear()
 
 @dp.message(MailFlow.waiting_for_text, F.text)
 async def state_text_received(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     if chat_id in buffer:
-        if message.text != "/skip": buffer[chat_id]["text"] = message.text
+        if message.text != "/skip": 
+            buffer[chat_id]["text"] = message.text
         await message.reply("⏳ Відправляю...")
         await execute_send(chat_id)
     await state.clear()
 
+@dp.message(F.text == "/start")
+async def cmd_start(message: types.Message):
+    """Команда /start з інструкцією."""
+    await message.reply(
+        "📬 **Бот-місток для пошти**\n\n"
+        "Надішли мені фото, файл або переслане повідомлення, "
+        "і я відправлю його на твою пошту.\n\n"
+        "📌 Можна змінити тему або текст через кнопки.\n"
+        "⏳ Час очікування перед автоматичною відправкою — 8 секунд.",
+        parse_mode="Markdown"
+    )
+
 async def handle_ping(request):
+    """Healthcheck для Render."""
     return web.Response(text="Bot is alive!")
+
+async def shutdown():
+    """Коректне завершення роботи бота."""
+    logging.info("🛑 Отримано сигнал завершення, зупиняю бота...")
+    await bot.session.close()
+    # Закриваємо всі відкриті з'єднання
+    for chat_id in list(buffer.keys()):
+        if "task" in buffer[chat_id]:
+            buffer[chat_id]["task"].cancel()
+    logging.info("✅ Бот зупинено")
+
+def handle_sigterm():
+    """Обробник сигналу SIGTERM від Render."""
+    asyncio.create_task(shutdown())
 
 async def main():
     logging.info("🔥 Універсальний бот-місток запущений!")
     
-    # Піднімаємо фоновий веб-сервер для Render (щоб працював безкоштовний Web Service)
+    # Піднімаємо фоновий веб-сервер для Render
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -332,8 +384,22 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     
-    # Запускаємо самого бота
-    await dp.start_polling(bot)
+    # Реєструємо обробник SIGTERM
+    signal.signal(signal.SIGTERM, lambda s, f: handle_sigterm())
+    
+    # 🔥 ВАЖЛИВО: Видаляємо webhook і скидаємо оновлення
+    await bot.delete_webhook(drop_pending_updates=True)
+    
+    # Даємо час на завершення старого процесу
+    await asyncio.sleep(1)
+    
+    # Запускаємо бота
+    try:
+        await dp.start_polling(bot)
+    except Exception as e:
+        logging.error(f"Polling впав: {e}")
+    finally:
+        await runner.cleanup()
 
 if __name__ == "__main__":
     asyncio.run(main())
