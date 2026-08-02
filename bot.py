@@ -4,6 +4,7 @@ import asyncio
 import logging
 import socket
 import signal
+import fcntl
 from aiohttp import web
 from email.message import EmailMessage
 from aiogram import Bot, Dispatcher, F, types
@@ -27,6 +28,24 @@ EMAIL_ADDRESS = os.getenv("EMAIL_ADDRESS")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 TARGET_EMAIL = os.getenv("TARGET_EMAIL", EMAIL_ADDRESS)
 
+# 🔒 Файл-локалка для запобігання запуску двох інстансів
+LOCK_FILE = "/tmp/bot.lock"
+
+def acquire_lock():
+    """Перевіряє, чи не запущено вже інший екземпляр бота."""
+    try:
+        lock_fd = open(LOCK_FILE, 'w')
+        fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return lock_fd
+    except (IOError, OSError):
+        logging.warning("⚠️ Інший екземпляр бота вже запущено. Виходимо...")
+        return None
+
+# Спроба отримати лок
+lock_fd = acquire_lock()
+if not lock_fd:
+    exit(0)
+
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
@@ -35,7 +54,7 @@ class MailFlow(StatesGroup):
     waiting_for_text = State()
 
 buffer = {}
-semaphore = asyncio.Semaphore(3)  # Обмежуємо кількість одночасних відправок
+semaphore = asyncio.Semaphore(3)
 
 def get_action_keyboard():
     buttons = [
@@ -45,7 +64,6 @@ def get_action_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 async def get_forward_data(message: types.Message, bot: Bot) -> dict:
-    """Витягує ім'я, посилання та завантажує аватарку автора пересланого повідомлення."""
     if not message.forward_origin:
         return None
 
@@ -96,7 +114,6 @@ async def get_forward_data(message: types.Message, bot: Bot) -> dict:
     return data
 
 def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
-    """Генерує HTML-шаблон із блоком автора, якщо є переслане повідомлення."""
     formatted_text = text.replace('\n', '<br>')
     
     forward_html = ""
@@ -140,7 +157,6 @@ def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
     """
 
 def send_email_sync(files: list, text_content: str, subject: str, forward_data: dict):
-    """Синхронна відправка листа через Gmail SMTP з SSL."""
     msg = EmailMessage()
     msg['Subject'] = subject
     msg['From'] = EMAIL_ADDRESS
@@ -151,12 +167,10 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
     html_content = generate_html_email(subject, text_content, forward_data)
     msg.add_alternative(html_content, subtype='html')
 
-    # Вбудовуємо аватарку в HTML тіло (якщо вона є)
     if forward_data and forward_data.get("avatar_path") and os.path.exists(forward_data["avatar_path"]):
         with open(forward_data["avatar_path"], 'rb') as img:
             msg.get_payload()[1].add_related(img.read(), maintype='image', subtype='jpeg', cid='avatar_img')
 
-    # Додаємо звичайні вкладення (файли/фото)
     for file_obj in files:
         file_path = file_obj["path"]
         file_name = file_obj["name"]
@@ -165,13 +179,11 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
                 file_data = f.read()
             msg.add_attachment(file_data, maintype='application', subtype='octet-stream', filename=file_name)
         
-    # Використовуємо SMTP_SSL з портом 465 (надійніше ніж STARTTLS на Render)
     with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as smtp:
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         smtp.send_message(msg)
 
 async def execute_send(chat_id: int):
-    """Асинхронна обгортка для відправки з семафором."""
     if chat_id not in buffer: 
         return
     
@@ -182,7 +194,6 @@ async def execute_send(chat_id: int):
     forward_data = data.get("forward_data")
     
     try:
-        # Обмежуємо кількість одночасних відправок через семафор
         async with semaphore:
             await asyncio.to_thread(send_email_sync, files, text_content, subject, forward_data)
         
@@ -192,12 +203,11 @@ async def execute_send(chat_id: int):
             f"✅ Відправлено! (Вкладень: {files_count})\n**Тема:** {subject}", 
             parse_mode="Markdown"
         )
-        logging.info(f"📨 Лист успішно відправлено для {chat_id}, тема: {subject}")
+        logging.info(f"📨 Лист успішно відправлено для {chat_id}")
     except Exception as e:
         logging.error(f"Помилка відправки для {chat_id}: {e}")
         await bot.send_message(chat_id, f"❌ Помилка: {e}")
     finally:
-        # Видаляємо тимчасові файли
         for file_obj in files:
             if os.path.exists(file_obj["path"]): 
                 os.remove(file_obj["path"])
@@ -205,7 +215,6 @@ async def execute_send(chat_id: int):
             os.remove(forward_data["avatar_path"])
 
 async def process_and_send_timer(chat_id: int):
-    """Таймер на 8 секунд для автоматичної відправки."""
     try:
         await asyncio.sleep(8.0) 
         if chat_id in buffer:
@@ -225,7 +234,6 @@ async def handle_files(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
     media_group_id = message.media_group_id
     
-    # Визначаємо тип файлу
     if message.document:
         file_id, original_name = message.document.file_id, message.document.file_name or "document"
     elif message.photo:
@@ -344,7 +352,6 @@ async def state_text_received(message: types.Message, state: FSMContext):
 
 @dp.message(F.text == "/start")
 async def cmd_start(message: types.Message):
-    """Команда /start з інструкцією."""
     await message.reply(
         "📬 **Бот-місток для пошти**\n\n"
         "Надішли мені фото, файл або переслане повідомлення, "
@@ -355,27 +362,27 @@ async def cmd_start(message: types.Message):
     )
 
 async def handle_ping(request):
-    """Healthcheck для Render."""
     return web.Response(text="Bot is alive!")
 
 async def shutdown():
-    """Коректне завершення роботи бота."""
     logging.info("🛑 Отримано сигнал завершення, зупиняю бота...")
     await bot.session.close()
-    # Закриваємо всі відкриті з'єднання
     for chat_id in list(buffer.keys()):
         if "task" in buffer[chat_id]:
             buffer[chat_id]["task"].cancel()
+    # Звільняємо лок-файл
+    if lock_fd:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        lock_fd.close()
+        os.unlink(LOCK_FILE)
     logging.info("✅ Бот зупинено")
 
 def handle_sigterm():
-    """Обробник сигналу SIGTERM від Render."""
     asyncio.create_task(shutdown())
 
 async def main():
     logging.info("🔥 Універсальний бот-місток запущений!")
     
-    # Піднімаємо фоновий веб-сервер для Render
     app = web.Application()
     app.router.add_get("/", handle_ping)
     runner = web.AppRunner(app)
@@ -384,22 +391,21 @@ async def main():
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     
-    # Реєструємо обробник SIGTERM
     signal.signal(signal.SIGTERM, lambda s, f: handle_sigterm())
     
-    # 🔥 ВАЖЛИВО: Видаляємо webhook і скидаємо оновлення
     await bot.delete_webhook(drop_pending_updates=True)
+    await asyncio.sleep(0.5)
     
-    # Даємо час на завершення старого процесу
-    await asyncio.sleep(1)
-    
-    # Запускаємо бота
     try:
         await dp.start_polling(bot)
     except Exception as e:
         logging.error(f"Polling впав: {e}")
     finally:
         await runner.cleanup()
+        # Звільняємо лок при завершенні
+        if lock_fd:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
