@@ -7,7 +7,12 @@ from email.message import EmailMessage
 from aiogram import Bot, Dispatcher, F, types
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import StatesGroup, State
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import (
+    InlineKeyboardMarkup, 
+    InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton
+)
 from database import (
     init_db, save_user_email, verify_code, get_user_email,
     is_user_verified, get_user_data, delete_user
@@ -51,7 +56,9 @@ init_db()
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# --- FSM СТЕЙТИ ---
+# ============================================================
+# FSM СТЕЙТИ
+# ============================================================
 class Registration(StatesGroup):
     waiting_for_email = State()
     waiting_for_code = State()
@@ -60,29 +67,46 @@ class MailFlow(StatesGroup):
     waiting_for_subject = State()
     waiting_for_text = State()
 
-# --- ГЛОБАЛЬНІ ЗМІННІ ---
+# ============================================================
+# ГЛОБАЛЬНІ ЗМІННІ
+# ============================================================
 buffer = {}
 semaphore = asyncio.Semaphore(3)
 
-# --- КЛАВІАТУРИ ---
-def get_main_keyboard():
-    buttons = [
-        [InlineKeyboardButton(text="📧 Змінити email", callback_data="change_email")],
-        [InlineKeyboardButton(text="❓ Допомога", callback_data="help")]
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+# ============================================================
+# КЛАВІАТУРИ
+# ============================================================
 
+# 1. Reply Keyboard (клавіатура внизу)
+def get_main_reply_keyboard():
+    """Головна клавіатура внизу (Reply Keyboard)."""
+    buttons = [
+        [KeyboardButton(text="📧 Змінити email")],
+        [KeyboardButton(text="❓ Допомога")]
+    ]
+    return ReplyKeyboardMarkup(
+        keyboard=buttons,
+        resize_keyboard=True,
+        one_time_keyboard=False
+    )
+
+# 2. Inline Keyboard (кнопки в повідомленні)
 def get_action_keyboard():
+    """Кнопки для роботи з файлами."""
     buttons = [
         [InlineKeyboardButton(text="✏️ Змінити тему", callback_data="add_subject")],
         [InlineKeyboardButton(text="📤 Відправити зараз", callback_data="send_now")]
     ]
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
-# --- ДОПОМІЖНІ ФУНКЦІЇ ---
+# ============================================================
+# ДОПОМІЖНІ ФУНКЦІЇ
+# ============================================================
+
 async def send_verification_code(email: str, code: str):
-    """Надсилає на пошту лист з кодом підтвердження."""
-    subject = "🔐 Код підтвердження для Telegram-бота"
+    """Надсилає красивий HTML-лист з кодом підтвердження (без JS)."""
+    subject = "🔐 Підтвердження email для Telegram-бота"
+
     text = f"""
 Ваш код підтвердження: {code}
 
@@ -91,16 +115,224 @@ async def send_verification_code(email: str, code: str):
 
 Якщо ви не реєструвалися в боті @ResendToEmail_bot — просто проігноруйте цей лист.
 """
-    
+
+    html = f"""
+    <!DOCTYPE html>
+    <html lang="uk">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Підтвердження email</title>
+        <style>
+            * {{
+                margin: 0;
+                padding: 0;
+                box-sizing: border-box;
+            }}
+            body {{
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                background: #fafafa;
+                margin: 0;
+                padding: 30px 15px;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }}
+            .container {{
+                max-width: 480px;
+                width: 100%;
+                margin: 0 auto;
+                background: #ffffff;
+                border-radius: 16px;
+                padding: 40px 35px;
+                box-shadow: 0 4px 20px rgba(0,0,0,0.03);
+                border: 1px solid #ebebeb;
+            }}
+            .badge {{
+                display: inline-block;
+                background: #eef2ff;
+                color: #4338ca;
+                font-size: 12px;
+                font-weight: 600;
+                padding: 4px 14px;
+                border-radius: 30px;
+                letter-spacing: 0.3px;
+                text-transform: uppercase;
+                margin-bottom: 20px;
+            }}
+            h1 {{
+                font-size: 24px;
+                font-weight: 700;
+                color: #111827;
+                margin: 0 0 8px 0;
+                letter-spacing: -0.4px;
+            }}
+            .sub {{
+                color: #6b7280;
+                font-size: 15px;
+                line-height: 1.6;
+                margin: 0 0 28px 0;
+            }}
+            .code-block {{
+                background: #f9fafb;
+                border-radius: 12px;
+                padding: 24px;
+                text-align: center;
+                border: 1px solid #e5e7eb;
+                margin-bottom: 28px;
+                user-select: all;
+                -webkit-user-select: all;
+                cursor: text;
+                transition: background 0.15s, border-color 0.15s;
+            }}
+            .code-block:hover {{
+                background: #f3f4f6;
+                border-color: #4338ca;
+            }}
+            .code-number {{
+                font-size: 44px;
+                font-weight: 700;
+                letter-spacing: 10px;
+                color: #111827;
+                font-feature-settings: "tnum";
+            }}
+            .copy-hint {{
+                font-size: 13px;
+                color: #9ca3af;
+                margin-top: 10px;
+                user-select: none;
+                -webkit-user-select: none;
+            }}
+            .code-block:hover .copy-hint {{
+                color: #6b7280;
+            }}
+            .info-box {{
+                background: #f3f4f6;
+                border-radius: 10px;
+                padding: 16px 20px;
+                font-size: 14px;
+                color: #374151;
+                line-height: 1.5;
+                border-left: 3px solid #4338ca;
+            }}
+            .info-box strong {{
+                display: block;
+                margin-bottom: 2px;
+            }}
+            .footer {{
+                margin-top: 30px;
+                padding-top: 20px;
+                border-top: 1px solid #f3f4f6;
+                font-size: 12px;
+                color: #9ca3af;
+                text-align: center;
+                line-height: 1.6;
+            }}
+            .footer a {{
+                color: #4338ca;
+                text-decoration: none;
+                font-weight: 500;
+            }}
+            .footer a:hover {{
+                text-decoration: underline;
+            }}
+            .bot-name {{
+                font-weight: 600;
+                color: #111827;
+            }}
+            @media (max-width: 480px) {{
+                .container {{
+                    padding: 28px 20px;
+                }}
+                .code-number {{
+                    font-size: 34px;
+                    letter-spacing: 6px;
+                }}
+                h1 {{
+                    font-size: 21px;
+                }}
+            }}
+            @media (prefers-color-scheme: dark) {{
+                body {{
+                    background: #1a1a1a;
+                }}
+                .container {{
+                    background: #262626;
+                    border-color: #404040;
+                }}
+                h1 {{
+                    color: #f3f4f6;
+                }}
+                .sub {{
+                    color: #a3a3a3;
+                }}
+                .code-block {{
+                    background: #1f1f1f;
+                    border-color: #404040;
+                }}
+                .code-number {{
+                    color: #f3f4f6;
+                }}
+                .code-block:hover {{
+                    background: #2a2a2a;
+                }}
+                .info-box {{
+                    background: #1f1f1f;
+                    color: #d1d5db;
+                    border-left-color: #818cf8;
+                }}
+                .footer {{
+                    border-top-color: #404040;
+                    color: #737373;
+                }}
+                .bot-name {{
+                    color: #f3f4f6;
+                }}
+                .badge {{
+                    background: #312e81;
+                    color: #a5b4fc;
+                }}
+            }}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="badge">🔐 Безпека</div>
+            <h1>Підтвердіть email</h1>
+            <p class="sub">
+                Ви отримали цей код, тому що реєструєтесь у боті
+                <strong>@ResendToEmail_bot</strong>.
+            </p>
+            <div class="code-block">
+                <div class="code-number">{code}</div>
+                <div class="copy-hint">👆 Виділіть код і скопіюйте його</div>
+            </div>
+            <div class="info-box">
+                <strong>✏️ Як завершити реєстрацію</strong>
+                Вставте цей код у Telegram-бот. Після підтвердження ви зможете надсилати файли на свою пошту.
+            </div>
+            <div class="footer">
+                <span class="bot-name">ResendToEmail</span> ·
+                <a href="https://t.me/ResendToEmail_bot">@ResendToEmail_bot</a><br>
+                Якщо ви не запитували цей код — просто проігноруйте лист.
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+
     msg = EmailMessage()
     msg['Subject'] = subject
     msg['From'] = EMAIL_ADDRESS
     msg['To'] = email
     msg.set_content(text)
-    
+    msg.add_alternative(html, subtype='html')
+
     with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as smtp:
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         smtp.send_message(msg)
+
 
 async def get_forward_data(message: types.Message, bot: Bot) -> dict:
     """Витягує дані автора, якщо повідомлення переслане."""
@@ -152,6 +384,7 @@ async def get_forward_data(message: types.Message, bot: Bot) -> dict:
         logging.error(f"Помилка отримання аватарки: {e}")
 
     return data
+
 
 def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
     """Генерує HTML-лист з блоком автора (якщо є) та футером."""
@@ -205,6 +438,7 @@ def generate_html_email(subject: str, text: str, forward_data: dict) -> str:
     </html>
     """
 
+
 def send_email_sync(files: list, text_content: str, subject: str, forward_data: dict, target_email: str):
     """Відправка листа через Gmail SMTP на вказану пошту."""
     msg = EmailMessage()
@@ -231,6 +465,7 @@ def send_email_sync(files: list, text_content: str, subject: str, forward_data: 
     with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=10) as smtp:
         smtp.login(EMAIL_ADDRESS, EMAIL_PASSWORD)
         smtp.send_message(msg)
+
 
 async def execute_send(chat_id: int):
     """Асинхронна обгортка для відправки."""
@@ -269,6 +504,7 @@ async def execute_send(chat_id: int):
         if forward_data and forward_data.get("avatar_path") and os.path.exists(forward_data["avatar_path"]):
             os.remove(forward_data["avatar_path"])
 
+
 async def process_and_send_timer(chat_id: int):
     """Автоматична відправка через 8 секунд."""
     try:
@@ -285,24 +521,26 @@ async def process_and_send_timer(chat_id: int):
     except asyncio.CancelledError:
         pass 
 
+
 # ============================================================
-# 1️⃣ ОБРОБНИК КОМАНДИ /start
+# ОБРОБНИКИ КОМАНД
 # ============================================================
+
 @dp.message(F.text == "/start")
 async def cmd_start(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
     user_data = get_user_data(user_id)
-    
+
     if user_data and user_data["is_verified"]:
         await message.reply(
             f"👋 Вітаю! Твій email: **{user_data['email']}**\n\n"
             "Надішли мені фото або файл — я відправлю його на пошту.\n"
             "📌 Можна змінити тему або текст через кнопки.",
             parse_mode="Markdown",
-            reply_markup=get_main_keyboard()
+            reply_markup=get_main_reply_keyboard()
         )
         return
-    
+
     if user_data and not user_data["is_verified"]:
         await state.set_state(Registration.waiting_for_code)
         await message.reply(
@@ -311,7 +549,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
             "Не отримав листа? Напиши /resend_code"
         )
         return
-    
+
     await state.set_state(Registration.waiting_for_email)
     await message.reply(
         "📧 **Вітаю!**\n\n"
@@ -321,61 +559,7 @@ async def cmd_start(message: types.Message, state: FSMContext):
         parse_mode="Markdown"
     )
 
-# ============================================================
-# 2️⃣ ОБРОБНИК ВВЕДЕННЯ EMAIL
-# ============================================================
-@dp.message(Registration.waiting_for_email, F.text)
-async def email_received(message: types.Message, state: FSMContext):
-    email = message.text.strip()
-    user_id = message.from_user.id
-    
-    if "@" not in email or "." not in email:
-        await message.reply("❌ Це схоже на неправильну email-адресу. Спробуй ще раз.")
-        return
-    
-    code = save_user_email(user_id, email)
-    
-    try:
-        await send_verification_code(email, code)
-    except Exception as e:
-        logging.error(f"Помилка відправки коду: {e}")
-        await message.reply("❌ Не вдалося надіслати лист. Перевір правильність email або спробуй пізніше.")
-        return
-    
-    await state.set_state(Registration.waiting_for_code)
-    await message.reply(
-        "📧 **Код надіслано!**\n\n"
-        "Перевір пошту і введи 6-значний код сюди.\n"
-        "⏳ Код дійсний 5 хвилин.\n\n"
-        "Не отримав листа? Напиши /resend_code"
-    )
 
-# ============================================================
-# 3️⃣ ОБРОБНИК ВВЕДЕННЯ КОДУ
-# ============================================================
-@dp.message(Registration.waiting_for_code, F.text)
-async def code_received(message: types.Message, state: FSMContext):
-    code = message.text.strip()
-    user_id = message.from_user.id
-    
-    if verify_code(user_id, code):
-        await state.clear()
-        email = get_user_email(user_id)
-        await message.reply(
-            f"✅ **Email підтверджено!**\n\n"
-            f"📧 {email}\n\n"
-            "Тепер надсилай мені файли, і я буду відправляти їх на цю пошту.",
-            reply_markup=get_main_keyboard()
-        )
-    else:
-        await message.reply(
-            "❌ **Невірний або прострочений код!**\n\n"
-            "Спробуй ще раз або напиши /resend_code для нового."
-        )
-
-# ============================================================
-# 4️⃣ КОМАНДА /resend_code
-# ============================================================
 @dp.message(F.text == "/resend_code")
 async def resend_code(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
@@ -405,9 +589,99 @@ async def resend_code(message: types.Message, state: FSMContext):
         "⏳ Код дійсний 5 хвилин."
     )
 
+
 # ============================================================
-# 5️⃣ ОБРОБНИК ФАЙЛІВ
+# ОБРОБНИКИ РЕЄСТРАЦІЇ
 # ============================================================
+
+@dp.message(Registration.waiting_for_email, F.text)
+async def email_received(message: types.Message, state: FSMContext):
+    email = message.text.strip()
+    user_id = message.from_user.id
+    
+    if "@" not in email or "." not in email:
+        await message.reply("❌ Це схоже на неправильну email-адресу. Спробуй ще раз.")
+        return
+    
+    code = save_user_email(user_id, email)
+    
+    try:
+        await send_verification_code(email, code)
+    except Exception as e:
+        logging.error(f"Помилка відправки коду: {e}")
+        await message.reply("❌ Не вдалося надіслати лист. Перевір правильність email або спробуй пізніше.")
+        return
+    
+    await state.set_state(Registration.waiting_for_code)
+    await message.reply(
+        "📧 **Код надіслано!**\n\n"
+        "Перевір пошту і введи 6-значний код сюди.\n"
+        "⏳ Код дійсний 5 хвилин.\n\n"
+        "Не отримав листа? Напиши /resend_code"
+    )
+
+
+@dp.message(Registration.waiting_for_code, F.text)
+async def code_received(message: types.Message, state: FSMContext):
+    code = message.text.strip()
+    user_id = message.from_user.id
+    
+    if verify_code(user_id, code):
+        await state.clear()
+        email = get_user_email(user_id)
+        await message.reply(
+            f"✅ **Email підтверджено!**\n\n"
+            f"📧 {email}\n\n"
+            "Тепер надсилай мені файли, і я буду відправляти їх на цю пошту.",
+            reply_markup=get_main_reply_keyboard()
+        )
+    else:
+        await message.reply(
+            "❌ **Невірний або прострочений код!**\n\n"
+            "Спробуй ще раз або напиши /resend_code для нового."
+        )
+
+
+# ============================================================
+# ОБРОБНИКИ REPLY KEYBOARD (кнопки внизу)
+# ============================================================
+
+@dp.message(F.text == "📧 Змінити email")
+async def change_email_button(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+
+    import sqlite3
+    from database import DB_PATH
+    with sqlite3.connect(DB_PATH) as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+        conn.commit()
+
+    await state.set_state(Registration.waiting_for_email)
+    await message.reply(
+        "📧 Введи нову email-адресу, на яку я буду надсилати листи.\n\n"
+        "Наприклад: `my@email.com`",
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(F.text == "❓ Допомога")
+async def help_button(message: types.Message):
+    await message.reply(
+        "📖 **Допомога**\n\n"
+        "1️⃣ Надішли мені будь-який файл або фото.\n"
+        "2️⃣ Я відправлю його на твою пошту.\n"
+        "3️⃣ Можна змінити тему або дописати текст через кнопки.\n\n"
+        "📧 Щоб змінити email — натисни кнопку нижче.",
+        parse_mode="Markdown",
+        reply_markup=get_main_reply_keyboard()
+    )
+
+
+# ============================================================
+# ОБРОБНИКИ ФАЙЛІВ ТА ТЕКСТУ
+# ============================================================
+
 @dp.message(F.document | F.photo | F.video | F.audio | F.voice | F.animation)
 async def handle_files(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
@@ -474,9 +748,7 @@ async def handle_files(message: types.Message, state: FSMContext):
     except Exception as e:
         await message.reply(f"❌ Помилка: {e}")
 
-# ============================================================
-# 6️⃣ ОБРОБНИК ТЕКСТУ
-# ============================================================
+
 @dp.message(F.text & ~F.document & ~F.photo & ~F.video & ~F.audio & ~F.voice & ~F.animation)
 async def handle_quick_text(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
@@ -499,9 +771,11 @@ async def handle_quick_text(message: types.Message, state: FSMContext):
             
         await execute_send(chat_id)
 
+
 # ============================================================
-# 7️⃣ CALLBACK-ЗАПИТИ (КНОПКИ)
+# ОБРОБНИКИ INLINE КНОПОК (в повідомленні)
 # ============================================================
+
 @dp.callback_query(F.data == "send_now")
 async def cb_send_now(callback: types.CallbackQuery):
     chat_id = callback.message.chat.id
@@ -510,6 +784,7 @@ async def cb_send_now(callback: types.CallbackQuery):
         await callback.message.edit_text("⏳ Відправляю...")
         await execute_send(chat_id)
     await callback.answer()
+
 
 @dp.callback_query(F.data == "add_subject")
 async def cb_add_subject(callback: types.CallbackQuery, state: FSMContext):
@@ -520,32 +795,11 @@ async def cb_add_subject(callback: types.CallbackQuery, state: FSMContext):
         await callback.message.edit_text("✏️ Напиши нову **тему** для листа:", parse_mode="Markdown")
     await callback.answer()
 
-@dp.callback_query(F.data == "change_email")
-async def cb_change_email(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(Registration.waiting_for_email)
-    await callback.message.edit_text(
-        "📧 Введи нову email-адресу, на яку я буду надсилати листи.\n\n"
-        "Наприклад: `my@email.com`",
-        parse_mode="Markdown"
-    )
-    await callback.answer()
-
-@dp.callback_query(F.data == "help")
-async def cb_help(callback: types.CallbackQuery):
-    await callback.message.edit_text(
-        "📖 **Допомога**\n\n"
-        "1️⃣ Надішли мені будь-який файл або фото.\n"
-        "2️⃣ Я відправлю його на твою пошту.\n"
-        "3️⃣ Можна змінити тему або дописати текст через кнопки.\n\n"
-        "📧 Щоб змінити email — натисни кнопку нижче.",
-        parse_mode="Markdown",
-        reply_markup=get_main_keyboard()
-    )
-    await callback.answer()
 
 # ============================================================
-# 8️⃣ ОБРОБНИКИ FSM (ТЕМА / ТЕКСТ)
+# ОБРОБНИКИ FSM (ТЕМА / ТЕКСТ)
 # ============================================================
+
 @dp.message(MailFlow.waiting_for_subject, F.text)
 async def state_subject_received(message: types.Message, state: FSMContext):
     chat_id = message.chat.id
@@ -555,6 +809,7 @@ async def state_subject_received(message: types.Message, state: FSMContext):
         await message.reply("✅ Тему збережено!\nТепер напиши **текст** листа (або натисни /skip).", parse_mode="Markdown")
     else: 
         await state.clear()
+
 
 @dp.message(MailFlow.waiting_for_text, F.text)
 async def state_text_received(message: types.Message, state: FSMContext):
@@ -566,9 +821,11 @@ async def state_text_received(message: types.Message, state: FSMContext):
         await execute_send(chat_id)
     await state.clear()
 
+
 # ============================================================
-# 9️⃣ ЗАПУСК БОТА
+# ЗАПУСК БОТА
 # ============================================================
+
 async def main():
     logging.info("🔥 Бот-місток запущений!")
     
