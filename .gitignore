@@ -1,12 +1,23 @@
-.env
-__pycache__/
-*.pyc
-venv/
-.venv/
+# База даних
+users.db
+*.db
+
+# Тимчасові файли бота
 avatar_*.jpg
 *.ogg
 *.mp4
 *.mp3
-*.webp
 *.lock
-/tmp/
+
+# Змінні середовища (токени, паролі)
+.env
+
+# Кеш Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Віртуальне середовище
+venv/
+.venv/
+env/
